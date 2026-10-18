@@ -1,0 +1,9 @@
+name: NexusGateway
+version: '${version}'
+
+main: org.luminolcraft.nexusGateway.Main
+api-version: '26.2'
+load: POSTWORLD
+folia-supported: true
+
+authors: [ NatJerry ]
