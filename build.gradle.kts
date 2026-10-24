@@ -11,6 +11,7 @@ repositories {
 dependencies {
     compileOnly("io.papermc.paper:paper-api:26.2.build.+")
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
+    implementation("net.objecthunter:exp4j:0.4.8")
 }
 
 kotlin {
@@ -20,6 +21,10 @@ kotlin {
 tasks {
     build {
         dependsOn(shadowJar)
+    }
+
+    shadowJar {
+        relocate("net.objecthunter.exp4j", "org.luminolcraft.nexusGateway.shaded.exp4j")
     }
 
     processResources {

@@ -1,14 +1,24 @@
 package org.luminolcraft.nexusGateway
 
+import net.kyori.adventure.text.minimessage.MiniMessage
 import org.bukkit.plugin.java.JavaPlugin
 
 class Main : JavaPlugin() {
 
     override fun onEnable() {
-        // Plugin startup logic
+        instance = this
+        configManager = ConfigManager()
+        configManager.initConfig()
+        configManager.loadConfig()
     }
 
     override fun onDisable() {
-        // Plugin shutdown logic
+        configManager.savePlayerCache()
+    }
+
+    companion object {
+        lateinit var instance: Main
+        lateinit var configManager: ConfigManager
+        val miniMessage: MiniMessage = MiniMessage.miniMessage()
     }
 }
