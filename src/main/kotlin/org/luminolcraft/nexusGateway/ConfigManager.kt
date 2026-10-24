@@ -7,12 +7,15 @@ import org.bukkit.configuration.file.FileConfiguration
 import org.bukkit.configuration.file.YamlConfiguration
 import java.io.File
 import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
 import java.util.logging.Logger
+import kotlin.getOrElse
 
 class ConfigManager {
     val gson = Gson()
     val dataFolder: File = Main.instance.dataFolder
     val configFile = File(dataFolder, "config.yml")
+    val playerCacheMap = ConcurrentHashMap<String, PlayerCacheData>()
     val playerCacheFile = File(dataFolder, "playerCache.json")
 
     var config: FileConfiguration = YamlConfiguration.loadConfiguration(configFile)
@@ -116,11 +119,11 @@ class ConfigManager {
             evaluator = buildExpression(DEFAULT_EXPIRES_EXPRESSION)
         }
 
-        var minutes = evaluator?.let { evaluateExpiresMinutes(it) } ?: Double.NaN
+        var minutes = evaluator?.let { getPlayerCacheExpiresMinutes(it,PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT) } ?: Double.NaN
         if (!minutes.isFinite() || minutes <= 0.0) {
             logger.warning("player-cache-expires-expression 求值无效($minutes)，改用默认表达式: $DEFAULT_EXPIRES_EXPRESSION")
             evaluator = buildExpression(DEFAULT_EXPIRES_EXPRESSION)
-            minutes = evaluator?.let { evaluateExpiresMinutes(it) } ?: Double.NaN
+            minutes = evaluator?.let { getPlayerCacheExpiresMinutes(it,PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT) } ?: Double.NaN
         }
         if (!minutes.isFinite() || minutes <= 0.0) {
             logger.warning("默认表达式仍无法求值，玩家缓存过期时间回退为 0")
@@ -132,8 +135,10 @@ class ConfigManager {
 
     fun reloadConfig() {
         config = YamlConfiguration.loadConfiguration(configFile)
+        Main.httpClient.close()
         initConfig()
         loadConfig()
+        Main.initHttpClient()
     }
 
     fun initPlayerCacheFile() {
@@ -155,8 +160,8 @@ class ConfigManager {
         null
     }
 
-    private fun evaluateExpiresMinutes(expression: Expression): Double = runCatching {
-        expression.setVariable(VARIABLE_X, PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT.toDouble())
+    fun getPlayerCacheExpiresMinutes(expression: Expression,joinCount: Int): Double = runCatching {
+        expression.setVariable(VARIABLE_X, joinCount.toDouble())
         expression.evaluate()
     }.getOrElse {
         logger.warning("player-cache-expires-expression 求值失败: ${it.message}")
@@ -189,6 +194,7 @@ class ConfigManager {
             logger.warning("无法创建文件 ${file.name}: ${it.message}")
         }
     }
+    data class PlayerCacheData(val timestamp: Long, val playerJoinCount: Long)
 
     companion object {
         private const val MILLIS_PER_MINUTE = 60_000L
