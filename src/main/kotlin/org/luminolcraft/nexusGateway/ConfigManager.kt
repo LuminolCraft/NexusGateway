@@ -1,6 +1,11 @@
 package org.luminolcraft.nexusGateway
 
+import com.cronutils.model.Cron
+import com.cronutils.model.CronType
+import com.cronutils.model.definition.CronDefinitionBuilder
+import com.cronutils.parser.CronParser
 import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import net.objecthunter.exp4j.Expression
 import net.objecthunter.exp4j.ExpressionBuilder
 import org.bukkit.configuration.file.FileConfiguration
@@ -42,10 +47,16 @@ class ConfigManager {
     var fixedCacheExpiresMin = false
 
     @Volatile
-    var playerCacheExpiresEvaluator: Expression? = null
+    var cacheFlushIntervalMin: Int = DEFAULT_CACHE_FLUSH_INTERVAL_MIN
 
     @Volatile
-    var cacheFlushIntervalMin: Int = DEFAULT_CACHE_FLUSH_INTERVAL_MIN
+    var resetCacheCron: String = DEFAULT_RESET_CACHE_CRON
+
+    @Volatile
+    lateinit var resetCron: Cron
+
+    @Volatile
+    lateinit var threadLocalExpression: ThreadLocal<Expression>
 
     val cacheFlushIntervalMillis: Long
         get() = cacheFlushIntervalMin * MILLIS_PER_MINUTE
@@ -78,6 +89,8 @@ class ConfigManager {
             DEFAULT_CACHE_FLUSH_INTERVAL_MIN,
             COMMENT_CACHE_FLUSH_INTERVAL_MIN
         ) || shouldSave
+        shouldSave =
+            ensureString(KEY_RESET_CACHE_CRON, DEFAULT_RESET_CACHE_CRON, COMMENT_RESET_CACHE_CRON) || shouldSave
         if (shouldSave) {
             runCatching { config.save(configFile) }.onFailure {
                 logger.warning("保存 config.yml 失败: ${it.message}")
@@ -86,6 +99,7 @@ class ConfigManager {
     }
 
     fun loadConfig() {
+        // 只接受 http/https 且必须有 host，非法配置回退默认地址
         apiBaseUrl = run {
             val trimmed = config.getString(KEY_API_BASE_URL)?.trim().orEmpty()
             if (trimmed.isEmpty()) {
@@ -104,6 +118,7 @@ class ConfigManager {
                 }
             }
         }
+        // 空 secret 视为配置缺失，回退默认值并告警
         secret = config.getString(KEY_SECRET)?.takeIf { it.isNotBlank() } ?: run {
             logger.warning("secret 为空，回退默认值")
             DEFAULT_SECRET
@@ -118,6 +133,21 @@ class ConfigManager {
         cacheFlushIntervalMin = positiveOrDefault(
             config.getInt(KEY_CACHE_FLUSH_INTERVAL_MIN), DEFAULT_CACHE_FLUSH_INTERVAL_MIN, KEY_CACHE_FLUSH_INTERVAL_MIN
         )
+        // 用 Quartz 方言校验 cron；非法配置回退默认值，保证 resetCron 一定可用
+        val rawResetCacheCron = config.getString(KEY_RESET_CACHE_CRON)?.trim().orEmpty()
+        resetCacheCron = runCatching {
+            resetCron = CronParser(CronDefinitionBuilder.instanceDefinitionFor(CronType.QUARTZ))
+                .parse(rawResetCacheCron)
+                .validate()
+            rawResetCacheCron
+        }.getOrElse {
+            logger.warning("reset-cache-cron 无效($rawResetCacheCron)，回退默认值: $DEFAULT_RESET_CACHE_CRON")
+            resetCron = CronParser(CronDefinitionBuilder.instanceDefinitionFor(CronType.QUARTZ))
+                .parse(DEFAULT_RESET_CACHE_CRON)
+            DEFAULT_RESET_CACHE_CRON
+        }
+
+        // 表达式解析失败时退回内置默认表达式，避免启动即失效
         val rawExpression = config.getString(KEY_EXPIRES_EXPRESSION)?.trim().orEmpty()
         playerCacheExpiresExpression = if (rawExpression.isEmpty()) DEFAULT_EXPIRES_EXPRESSION else rawExpression
 
@@ -129,26 +159,39 @@ class ConfigManager {
         }
 
         var minutes =
-            evaluator?.let { getPlayerCacheExpiresMinutes(it, PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT_FOR_CALCULATION_TEST.toLong()) } ?: Long.MIN_VALUE
+            evaluator?.let {
+                getPlayerCacheExpiresMinutes(
+                    it
+                )
+            } ?: Long.MIN_VALUE
         if (minutes <= 0L) {
             logger.warning("player-cache-expires-expression 求值无效($minutes)，改用默认表达式: $DEFAULT_EXPIRES_EXPRESSION")
             evaluator = buildExpression(DEFAULT_EXPIRES_EXPRESSION)
             minutes =
-                evaluator?.let { getPlayerCacheExpiresMinutes(it, PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT_FOR_CALCULATION_TEST.toLong()) } ?: Long.MIN_VALUE
+                evaluator?.let {
+                    getPlayerCacheExpiresMinutes(
+                        it
+                    )
+                } ?: Long.MIN_VALUE
         }
+        // 两次求值都失败说明表达式不可用，改用固定 5 分钟兜底
         if (minutes <= 0L) {
-            logger.warning("默认表达式仍无法求值，玩家缓存过期时间回退为 0")
+            logger.warning("默认表达式仍无法求值，玩家缓存过期时间回退为 5 min.")
             fixedCacheExpiresMin = true
         }
-        playerCacheExpiresEvaluator = evaluator
+        // exp4j 的 Expression 非线程安全，每线程各建一个实例，避免并发 setVariable 互相污染
+        threadLocalExpression = ThreadLocal.withInitial { buildExpression(playerCacheExpiresExpression)!! }
     }
 
     fun reloadConfig() {
         config = YamlConfiguration.loadConfiguration(configFile)
         Main.httpClient.close()
+        Main.stopJobs()
         initConfig()
         loadConfig()
         Main.initHttpClient()
+        Main.initSaveCacheTimerJob()
+        Main.initCacheResetJob()
     }
 
     fun initPlayerCacheFile() {
@@ -156,15 +199,30 @@ class ConfigManager {
     }
 
     fun loadPlayerCache() {
-        // TODO: 由用户实现 playerCache.json 的读取。
+        if (playerCacheFile.length() == 0L) return
+        val typeToken = object : TypeToken<ConcurrentHashMap<String, PlayerCacheData>>() {}.type
+        // 缓存文件损坏时回退空表，避免启动阶段直接失败
+        val addMap = runCatching {
+            gson.fromJson<ConcurrentHashMap<String, PlayerCacheData>>(
+                playerCacheFile.bufferedReader(Charsets.UTF_8),
+                typeToken
+            )
+        }.getOrElse { ConcurrentHashMap<String, PlayerCacheData>() }
+        playerCacheMap.putAll(addMap)
     }
 
     fun savePlayerCache() {
-        // TODO: 由用户实现 playerCache.json 的写入。
+        playerCacheFile.bufferedWriter(Charsets.UTF_8).use {
+            it.write(gson.toJson(playerCacheMap))
+        }
     }
 
+    // 清空内存缓存并截断文件，保证内存与磁盘一致
     fun resetPlayerCache() {
-
+        playerCacheMap.clear()
+        playerCacheFile.bufferedWriter(Charsets.UTF_8).use {
+            it.write("")
+        }
     }
 
     fun buildExpression(source: String): Expression? = runCatching {
@@ -174,9 +232,8 @@ class ConfigManager {
         null
     }
 
-    fun getPlayerCacheExpiresMinutes(expression: Expression, joinCount: Long): Long = runCatching {
-        expression.setVariable(VARIABLE_X, joinCount.toDouble())
-        expression.evaluate().toLong()
+    fun getPlayerCacheExpiresMinutes(expression: Expression, joinCount: Long = 1L): Long = runCatching {
+        expression.setVariable(VARIABLE_X, joinCount.toDouble()).evaluate().toLong()
     }.getOrElse {
         logger.warning("player-cache-expires-expression 求值失败: ${it.message}")
         Long.MIN_VALUE
@@ -221,6 +278,7 @@ class ConfigManager {
         private const val DEFAULT_REQUEST_TIMEOUT_SEC = 10
         private const val DEFAULT_EXPIRES_EXPRESSION = "5+(120-5)*(x/(120+x))"
         private const val DEFAULT_CACHE_FLUSH_INTERVAL_MIN = 5
+        private const val DEFAULT_RESET_CACHE_CRON = "0 0 0 ? * MON"
 
         private const val KEY_API_BASE_URL = "api-base-url"
         private const val KEY_SECRET = "secret"
@@ -229,10 +287,9 @@ class ConfigManager {
         private const val KEY_REQUEST_TIMEOUT_SEC = "request-timeout-sec"
         private const val KEY_EXPIRES_EXPRESSION = "player-cache-expires-expression"
         private const val KEY_CACHE_FLUSH_INTERVAL_MIN = "cache-flush-interval-min"
+        private const val KEY_RESET_CACHE_CRON = "reset-cache-cron"
 
         private const val VARIABLE_X = "x"
-
-        private const val PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT_FOR_CALCULATION_TEST: Int = 1
 
         private val COMMENT_API_BASE_URL = listOf(
             "Nexus 后端地址，生产环境建议使用 https。",
@@ -260,6 +317,11 @@ class ConfigManager {
         private val COMMENT_CACHE_FLUSH_INTERVAL_MIN = listOf(
             "玩家缓存写盘间隔，单位：分钟。",
             "小于等于 0 时回退默认值。"
+        )
+        private val COMMENT_RESET_CACHE_CRON = listOf(
+            "玩家缓存自动清空时间（Quartz 风格 cron，6/7 段）。",
+            "默认 0 0 0 ? * MON 表示每周一 00:00:00。",
+            "日/周字段必须有一个写 ?；格式非法时回退默认值。"
         )
     }
 }
