@@ -12,7 +12,7 @@ dependencies {
     compileOnly("io.papermc.paper:paper-api:26.2.build.+")
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
     implementation("net.objecthunter:exp4j:0.4.8")
-    implementation("org.quartz-scheduler:quartz:2.5.2")
+    implementation("com.cronutils:cron-utils:9.2.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     implementation("io.ktor:ktor-client-cio:3.5.2")
     implementation("io.ktor:ktor-client-content-negotiation:3.5.2")
@@ -30,7 +30,7 @@ tasks {
 
     shadowJar {
         relocate("net.objecthunter.exp4j", "org.luminolcraft.nexusGateway.shaded.exp4j")
-        relocate("org.quartz","org.luminolcraft.nexusGateway.shaded.quartz")
+        relocate("com.cronutils","org.luminolcraft.nexusGateway.shaded.cronutils")
     }
 
     processResources {
