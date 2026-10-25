@@ -9,7 +9,6 @@ import java.io.File
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.logging.Logger
-import kotlin.getOrElse
 
 class ConfigManager {
     val gson = Gson()
@@ -40,7 +39,7 @@ class ConfigManager {
     var playerCacheExpiresExpression: String = DEFAULT_EXPIRES_EXPRESSION
 
     @Volatile
-    var playerCacheExpiresMinutes: Double = 0.0
+    var fixedCacheExpiresMin = false
 
     @Volatile
     var playerCacheExpiresEvaluator: Expression? = null
@@ -65,10 +64,20 @@ class ConfigManager {
         shouldSave = ensureString(KEY_API_BASE_URL, DEFAULT_API_BASE_URL, COMMENT_API_BASE_URL) || shouldSave
         shouldSave = ensureString(KEY_SECRET, DEFAULT_SECRET, COMMENT_SECRET) || shouldSave
         shouldSave = ensureString(KEY_UNBIND_MESSAGE, DEFAULT_UNBIND_MESSAGE, COMMENT_UNBIND_MESSAGE) || shouldSave
-        shouldSave = ensureInt(KEY_CONNECTION_TIMEOUT_SEC, DEFAULT_CONNECTION_TIMEOUT_SEC, COMMENT_CONNECTION_TIMEOUT_SEC) || shouldSave
-        shouldSave = ensureInt(KEY_REQUEST_TIMEOUT_SEC, DEFAULT_REQUEST_TIMEOUT_SEC, COMMENT_REQUEST_TIMEOUT_SEC) || shouldSave
-        shouldSave = ensureString(KEY_EXPIRES_EXPRESSION, DEFAULT_EXPIRES_EXPRESSION, COMMENT_EXPIRES_EXPRESSION) || shouldSave
-        shouldSave = ensureInt(KEY_CACHE_FLUSH_INTERVAL_MIN, DEFAULT_CACHE_FLUSH_INTERVAL_MIN, COMMENT_CACHE_FLUSH_INTERVAL_MIN) || shouldSave
+        shouldSave = ensureInt(
+            KEY_CONNECTION_TIMEOUT_SEC,
+            DEFAULT_CONNECTION_TIMEOUT_SEC,
+            COMMENT_CONNECTION_TIMEOUT_SEC
+        ) || shouldSave
+        shouldSave =
+            ensureInt(KEY_REQUEST_TIMEOUT_SEC, DEFAULT_REQUEST_TIMEOUT_SEC, COMMENT_REQUEST_TIMEOUT_SEC) || shouldSave
+        shouldSave =
+            ensureString(KEY_EXPIRES_EXPRESSION, DEFAULT_EXPIRES_EXPRESSION, COMMENT_EXPIRES_EXPRESSION) || shouldSave
+        shouldSave = ensureInt(
+            KEY_CACHE_FLUSH_INTERVAL_MIN,
+            DEFAULT_CACHE_FLUSH_INTERVAL_MIN,
+            COMMENT_CACHE_FLUSH_INTERVAL_MIN
+        ) || shouldSave
         if (shouldSave) {
             runCatching { config.save(configFile) }.onFailure {
                 logger.warning("保存 config.yml 失败: ${it.message}")
@@ -119,17 +128,18 @@ class ConfigManager {
             evaluator = buildExpression(DEFAULT_EXPIRES_EXPRESSION)
         }
 
-        var minutes = evaluator?.let { getPlayerCacheExpiresMinutes(it,PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT) } ?: Double.NaN
-        if (!minutes.isFinite() || minutes <= 0.0) {
+        var minutes =
+            evaluator?.let { getPlayerCacheExpiresMinutes(it, PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT_FOR_CALCULATION_TEST.toLong()) } ?: Long.MIN_VALUE
+        if (minutes <= 0L) {
             logger.warning("player-cache-expires-expression 求值无效($minutes)，改用默认表达式: $DEFAULT_EXPIRES_EXPRESSION")
             evaluator = buildExpression(DEFAULT_EXPIRES_EXPRESSION)
-            minutes = evaluator?.let { getPlayerCacheExpiresMinutes(it,PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT) } ?: Double.NaN
+            minutes =
+                evaluator?.let { getPlayerCacheExpiresMinutes(it, PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT_FOR_CALCULATION_TEST.toLong()) } ?: Long.MIN_VALUE
         }
-        if (!minutes.isFinite() || minutes <= 0.0) {
+        if (minutes <= 0L) {
             logger.warning("默认表达式仍无法求值，玩家缓存过期时间回退为 0")
-            minutes = 0.0
+            fixedCacheExpiresMin = true
         }
-        playerCacheExpiresMinutes = minutes
         playerCacheExpiresEvaluator = evaluator
     }
 
@@ -153,19 +163,23 @@ class ConfigManager {
         // TODO: 由用户实现 playerCache.json 的写入。
     }
 
-    private fun buildExpression(source: String): Expression? = runCatching {
+    fun resetPlayerCache() {
+
+    }
+
+    fun buildExpression(source: String): Expression? = runCatching {
         ExpressionBuilder(source).variable(VARIABLE_X).build()
     }.getOrElse {
         logger.warning("player-cache-expires-expression 解析失败: ${it.message}")
         null
     }
 
-    fun getPlayerCacheExpiresMinutes(expression: Expression,joinCount: Int): Double = runCatching {
+    fun getPlayerCacheExpiresMinutes(expression: Expression, joinCount: Long): Long = runCatching {
         expression.setVariable(VARIABLE_X, joinCount.toDouble())
-        expression.evaluate()
+        expression.evaluate().toLong()
     }.getOrElse {
         logger.warning("player-cache-expires-expression 求值失败: ${it.message}")
-        Double.NaN
+        Long.MIN_VALUE
     }
 
     private fun positiveOrDefault(value: Int, default: Int, key: String): Int {
@@ -194,10 +208,11 @@ class ConfigManager {
             logger.warning("无法创建文件 ${file.name}: ${it.message}")
         }
     }
-    data class PlayerCacheData(val timestamp: Long, val playerJoinCount: Long)
+
+    data class PlayerCacheData(@Volatile var timestamp: Long, @Volatile var playerJoinCount: Long)
 
     companion object {
-        private const val MILLIS_PER_MINUTE = 60_000L
+        const val MILLIS_PER_MINUTE = 60_000L
 
         private const val DEFAULT_API_BASE_URL = "http://localhost:8080"
         private const val DEFAULT_SECRET = "some-fucking-secret"
@@ -217,8 +232,7 @@ class ConfigManager {
 
         private const val VARIABLE_X = "x"
 
-        // TODO: 接入真实“玩家每周加入次数”后替换该占位常量。
-        private const val PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT: Int = 1
+        private const val PLACEHOLDER_PLAYER_WEEKLY_JOIN_COUNT_FOR_CALCULATION_TEST: Int = 1
 
         private val COMMENT_API_BASE_URL = listOf(
             "Nexus 后端地址，生产环境建议使用 https。",

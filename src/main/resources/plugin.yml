@@ -21,6 +21,3 @@ commands:
 permissions:
   nexusgateway.usage:
     default: op
-
-  nexusgateway.bypass:
-    default: false
