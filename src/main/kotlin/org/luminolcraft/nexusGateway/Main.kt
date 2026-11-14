@@ -22,6 +22,7 @@ import org.bukkit.event.player.AsyncPlayerPreLoginEvent
 import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.plugin.java.JavaPlugin
 import java.time.ZonedDateTime
+import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.time.toJavaDuration
 
@@ -78,10 +79,11 @@ class Main : JavaPlugin(), Listener, TabExecutor {
     fun onPlayerPreLogin(event: AsyncPlayerPreLoginEvent) {
         configManager.playerCacheMap[event.uniqueId.toString()]?.let {
             if (it.timestamp > System.currentTimeMillis()) return
+            else configManager.playerCacheMap.remove(event.uniqueId.toString())
         }
         // 事件必须同步返回登录结果，只能阻塞等待；等待上限由 HttpTimeout 控制
         val isBind = runBlocking {
-            getIsPlayerBound(event.name)
+            getIsPlayerBound(event.name, event.uniqueId)
         }
         if (!isBind) {
             event.loginResult = AsyncPlayerPreLoginEvent.Result.KICK_OTHER
@@ -93,36 +95,37 @@ class Main : JavaPlugin(), Listener, TabExecutor {
 
     @EventHandler
     fun onPlayerQuit(event: PlayerQuitEvent) {
-        val playerName = event.player.name
-        queueManager.queuedPlayers.remove(playerName)
+        val playerName = event.player
+        queueManager.queuedPlayers.remove(Pair(playerName.name, playerName.uniqueId))
     }
 
 
     @OptIn(ExperimentalStdlibApi::class)
-    private suspend fun getIsPlayerBound(playerName: String): Boolean {
+    private suspend fun getIsPlayerBound(playerName: String, playerUuid: UUID): Boolean {
         // 配额每分钟重置，超限请求先入队放行，由队列在下一个窗口补查
         if (minuteAccessCount.get() >= QPM) {
-            if (!queueManager.queuedPlayers.contains(playerName)) {
-                queueManager.queuedPlayers.add(playerName)
+            if (!queueManager.queuedPlayers.contains(Pair(playerName, playerUuid))) {
+                queueManager.queuedPlayers.add(Pair(playerName, playerUuid))
             }
             return true
         }
         minuteAccessCount.incrementAndGet()
         val response: HttpResponse
         try {
-            response = httpClient.get(configManager.apiBaseUrl + "/api/v1/internal/minecraft/name/$playerName")
+            response =
+                httpClient.get(configManager.apiBaseUrl + "/api/v1/internal/minecraft/uuid/${playerUuid}?name=${playerName}")
         } catch (e: Exception) {
             logger.warning("Error getting player bound $playerName,Stopping.")
-            if (!queueManager.queuedPlayers.contains(playerName)) {
-                queueManager.queuedPlayers.add(playerName)
+            if (!queueManager.queuedPlayers.contains(Pair(playerName, playerUuid))) {
+                queueManager.queuedPlayers.add(Pair(playerName, playerUuid))
             }
             throw e
         }
         if (response.status.value == 200) {
             // 缓存键用离线 UUID；登录事件里的 UUID 在混合模式/代理下可能不同，命中率依赖两者一致
-            val uuidStr = Bukkit.getOfflinePlayer(playerName).uniqueId.toString()
+
             val playerCache =
-                configManager.playerCacheMap.getOrPutIfNull(uuidStr) {
+                configManager.playerCacheMap.getOrPutIfNull(playerUuid.toString()) {
                     ConfigManager.PlayerCacheData(
                         0,
                         0
@@ -146,8 +149,8 @@ class Main : JavaPlugin(), Listener, TabExecutor {
         }
         // 后端限流时同样入队，交给队列重试，不直接拒绝登录
         if (response.status.value == 429) {
-            if (!queueManager.queuedPlayers.contains(playerName)) {
-                queueManager.queuedPlayers.add(playerName)
+            if (!queueManager.queuedPlayers.contains(Pair(playerName, playerUuid))) {
+                queueManager.queuedPlayers.add(Pair(playerName, playerUuid))
             }
             return true
         }
