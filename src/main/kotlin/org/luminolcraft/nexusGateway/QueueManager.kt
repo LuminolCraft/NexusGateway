@@ -2,6 +2,7 @@ package org.luminolcraft.nexusGateway
 
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
+import io.ktor.http.encodeURLParameter
 import kotlinx.coroutines.*
 import kotlinx.coroutines.time.delay
 import org.bukkit.Bukkit
@@ -48,7 +49,10 @@ class QueueManager {
                     // 取消是正常停服流程，不能当网络错误重试
                     try {
                         response =
-                            httpClient.get(configManager.apiBaseUrl + "/api/v1/internal/minecraft/uuid/${playerUuid}?name=${playerName}")
+                            httpClient.get(
+                                configManager.apiBaseUrl +
+                                    "/api/v1/internal/minecraft/uuid/$playerUuid?name=${playerName.encodeURLParameter()}"
+                            )
                     } catch (e: CancellationException) {
                         return@launch
                     } catch (e: ConnectException) {
@@ -68,7 +72,7 @@ class QueueManager {
                         200 -> {
                             // 补查成功也要写缓存，否则下个窗口还会重复请求
                             val playerCache =
-                                configManager.playerCacheMap.getOrPutIfNull(playerUuid.toString()) {
+                                configManager.playerCacheMap.computeIfAbsent(playerUuid.toString()) {
                                     ConfigManager.PlayerCacheData(
                                         0,
                                         0

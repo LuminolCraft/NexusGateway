@@ -113,7 +113,10 @@ class Main : JavaPlugin(), Listener, TabExecutor {
         val response: HttpResponse
         try {
             response =
-                httpClient.get(configManager.apiBaseUrl + "/api/v1/internal/minecraft/uuid/${playerUuid}?name=${playerName}")
+                httpClient.get(
+                    configManager.apiBaseUrl +
+                        "/api/v1/internal/minecraft/uuid/$playerUuid?name=${playerName.encodeURLParameter()}"
+                )
         } catch (e: Exception) {
             logger.warning("Error getting player bound $playerName,Stopping.")
             if (!queueManager.queuedPlayers.contains(Pair(playerName, playerUuid))) {
@@ -122,10 +125,10 @@ class Main : JavaPlugin(), Listener, TabExecutor {
             throw e
         }
         if (response.status.value == 200) {
-            // 缓存键用离线 UUID；登录事件里的 UUID 在混合模式/代理下可能不同，命中率依赖两者一致
-
+            // 缓存键统一用事件 UUID：与读取侧（onPlayerPreLogin）以及请求参数三处必须是同一个值，
+            // 否则代理/混合模式下读写键不一致，缓存永不命中，门禁会因撞限流而静默放行。
             val playerCache =
-                configManager.playerCacheMap.getOrPutIfNull(playerUuid.toString()) {
+                configManager.playerCacheMap.computeIfAbsent(playerUuid.toString()) {
                     ConfigManager.PlayerCacheData(
                         0,
                         0
