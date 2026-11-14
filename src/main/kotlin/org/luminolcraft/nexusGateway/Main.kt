@@ -95,8 +95,8 @@ class Main : JavaPlugin(), Listener, TabExecutor {
 
     @EventHandler
     fun onPlayerQuit(event: PlayerQuitEvent) {
-        val playerName = event.player
-        queueManager.queuedPlayers.remove(Pair(playerName.name, playerName.uniqueId))
+        val player = event.player
+        queueManager.queuedPlayers.remove(Pair(player.name, player.uniqueId))
     }
 
 

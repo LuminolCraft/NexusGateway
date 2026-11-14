@@ -12,6 +12,8 @@ import org.bukkit.configuration.file.FileConfiguration
 import org.bukkit.configuration.file.YamlConfiguration
 import java.io.File
 import java.net.URI
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.ConcurrentHashMap
 import java.util.logging.Logger
 
@@ -99,6 +101,10 @@ class ConfigManager {
     }
 
     fun loadConfig() {
+        // 每次重新加载都从"表达式可用"开始判定：否则配置里把表达式改好后 reload，
+        // 上一次置 true 的固定兜底会一直生效，缓存永远只有 5 分钟。
+        fixedCacheExpiresMin = false
+
         // 只接受 http/https 且必须有 host，非法配置回退默认地址
         apiBaseUrl = run {
             val trimmed = config.getString(KEY_API_BASE_URL)?.trim().orEmpty()
@@ -201,19 +207,33 @@ class ConfigManager {
     fun loadPlayerCache() {
         if (playerCacheFile.length() == 0L) return
         val typeToken = object : TypeToken<ConcurrentHashMap<String, PlayerCacheData>>() {}.type
-        // 缓存文件损坏时回退空表，避免启动阶段直接失败
+        // 缓存文件损坏（或内容为字面量 null）时回退空表，避免启动阶段直接失败。
+        // gson 的返回值是平台类型，文件内容为 "null" 时会返回 null，必须显式兜底，
+        // 否则 putAll(null) 直接 NPE。
         val addMap = runCatching {
             gson.fromJson<ConcurrentHashMap<String, PlayerCacheData>>(
                 playerCacheFile.bufferedReader(Charsets.UTF_8),
                 typeToken
             )
-        }.getOrElse { ConcurrentHashMap<String, PlayerCacheData>() }
+        }.getOrNull() ?: ConcurrentHashMap()
         playerCacheMap.putAll(addMap)
     }
 
     fun savePlayerCache() {
-        playerCacheFile.bufferedWriter(Charsets.UTF_8).use {
+        // 先写临时文件再一次性替换：直接覆盖时进程在写一半被杀会留下残缺 JSON，
+        // 下次启动只能整体丢弃缓存。同卷 rename 在 NTFS / ext4 上是原子的。
+        val tmp = File(dataFolder, playerCacheFile.name + ".tmp")
+        tmp.bufferedWriter(Charsets.UTF_8).use {
             it.write(gson.toJson(playerCacheMap))
+        }
+        runCatching {
+            Files.move(
+                tmp.toPath(), playerCacheFile.toPath(),
+                StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE
+            )
+        }.onFailure {
+            // 个别文件系统不支持原子替换，退回普通覆盖（仍比直接写目标文件安全）
+            Files.move(tmp.toPath(), playerCacheFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
     }
 
